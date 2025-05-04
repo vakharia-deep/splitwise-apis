@@ -6,7 +6,6 @@ defmodule Splitwise.Expenses do
   alias Ecto.Multi
   alias Splitwise.Accounts.User
   alias Splitwise.Accounts.Group
-  alias Splitwise.Accounts.GroupMember
 
   # Expense functions
   def list_expenses do
@@ -89,7 +88,6 @@ defmodule Splitwise.Expenses do
   def update_comment(comment_id, comment_params, current_user) do
     Multi.new()
     |> Multi.run(:get_comment, fn repo, _changes ->
-      # Get the comment with a lock to prevent concurrent modifications
       comment =
         from(c in Comment,
           join: e in Expense,
@@ -153,7 +151,6 @@ defmodule Splitwise.Expenses do
   end
 
   def delete_comment(comment_id, current_user) do
-    # Get the comment with a lock to prevent concurrent modifications
     comment =
       from(c in Comment,
         where: c.id == ^comment_id and c.user_id == ^current_user.id,
@@ -176,7 +173,6 @@ defmodule Splitwise.Expenses do
     end
   end
 
-  # Query functions
   def get_expenses_by_user(user_id) do
     Expense
     |> where([e], e.paid_by_id == ^user_id or e.added_by_id == ^user_id)
@@ -195,79 +191,23 @@ defmodule Splitwise.Expenses do
     |> Repo.all()
   end
 
-  def add_expense_shares(%Expense{} = expense, shares) when is_list(shares) do
-    Multi.new()
-    |> Multi.run(:validate_shares, fn _repo, _changes ->
-      # Validate that all required fields are present and amounts sum up correctly
-      total_share =
-        Enum.reduce(shares, 0.0, fn share, acc ->
-          acc + share["amount"]
-        end)
-
-      # Using small epsilon for float comparison
-      if abs(total_share - expense.amount) < 0.01 do
-        {:ok, shares}
-      else
-        {:error, "Share amounts must sum up to expense amount"}
-      end
-    end)
-    |> Multi.run(:create_shares, fn repo, %{validate_shares: shares} ->
-      now = NaiveDateTime.utc_now()
-
-      expense_shares =
-        Enum.map(shares, fn share ->
-          %{
-            expense_id: expense.id,
-            user_id: share["user_id"],
-            amount: share["amount"],
-            inserted_at: now,
-            updated_at: now
-          }
-        end)
-
-      {count, _} = repo.insert_all(ExpenseShare, expense_shares)
-      {:ok, count}
-    end)
-    |> Multi.run(:load_expense, fn repo, _changes ->
-      expense = repo.preload(expense, shares: from(s in ExpenseShare, preload: :user))
-      {:ok, expense}
-    end)
-    |> Repo.transaction()
-    |> case do
-      {:ok, %{load_expense: expense}} ->
-        {:ok, expense}
-
-      {:error, :validate_shares, error, _} ->
-        {:error, error}
-
-      {:error, _failed_operation, _failed_value, _changes_so_far} ->
-        {:error, "Failed to add expense shares"}
-    end
-  end
-
-  def add_expense_shares(_, _), do: {:error, "Invalid share data"}
-
   def create_expense_with_shares(expense_params, shares, current_user) when is_list(shares) do
     if shares == [] or Enum.any?(shares, fn s -> !is_map(s) or is_nil(s["user_id"]) end) do
       {:error, "Shares list must be a non-empty list of valid share maps with user_id."}
     else
       Multi.new()
       |> Multi.run(:find_or_create_group, fn repo, _changes ->
-        # If group_id is nil, find or create a group with all users involved
         if is_nil(expense_params["group_id"]) do
-          # Get all user IDs involved in the expense (payer and share owners)
           user_ids =
             ([expense_params["paid_by_id"]] ++
                Enum.map(shares, & &1["user_id"]))
             |> Enum.uniq()
 
-          # Lock the users table to prevent concurrent group creation
           from(u in User, where: u.id in ^user_ids, lock: "FOR UPDATE")
           |> repo.all()
 
           case Splitwise.Accounts.find_or_create_group_by_users(user_ids, current_user) do
             {:ok, %{group: group}} ->
-              # Update expense params with the group ID
               {:ok, Map.put(expense_params, "group_id", group.id)}
 
             error ->
@@ -281,7 +221,6 @@ defmodule Splitwise.Expenses do
         Expense.changeset(%Expense{}, updated_params)
       end)
       |> Multi.run(:validate_shares, fn _repo, %{expense: expense} ->
-        # Check if this is an equal split request (no percentages or amounts specified)
         is_equal_split =
           Enum.all?(shares, fn share ->
             is_nil(share["share_percentage"]) and is_nil(share["amount"]) and
@@ -289,11 +228,9 @@ defmodule Splitwise.Expenses do
           end)
 
         if is_equal_split do
-          # Calculate equal share percentage
           share_count = length(shares)
           equal_percentage = 1.0 / share_count
 
-          # Update shares with equal percentages
           updated_shares =
             Enum.map(shares, fn share ->
               Map.put(share, "share_percentage", equal_percentage)
@@ -301,7 +238,6 @@ defmodule Splitwise.Expenses do
 
           {:ok, updated_shares}
         else
-          # Check if we have a mix of percentage and amount-based shares
           has_percentages =
             Enum.any?(shares, fn share -> not is_nil(share["share_percentage"]) end)
 
@@ -310,16 +246,13 @@ defmodule Splitwise.Expenses do
           if has_percentages and has_amounts do
             {:error, "Cannot mix percentage-based and amount-based shares in the same expense"}
           else
-            # Process shares based on whether they use percentages or amounts
             processed_shares =
               if has_percentages do
-                # Validate and process percentage-based shares
                 case validate_percentage_shares(shares, expense.amount) do
                   {:ok, valid_shares} -> valid_shares
                   {:error, reason} -> {:error, reason}
                 end
               else
-                # Validate and process amount-based shares
                 case validate_amount_shares(shares, expense.amount) do
                   {:ok, valid_shares} -> valid_shares
                   {:error, reason} -> {:error, reason}
@@ -336,7 +269,6 @@ defmodule Splitwise.Expenses do
       |> Multi.run(:create_shares, fn repo, %{expense: expense, validate_shares: shares} ->
         expense_shares =
           Enum.map(shares, fn share ->
-            # Calculate amount based on percentage if not already set
             amount =
               if is_nil(share["amount"]) do
                 expense.amount * share["share_percentage"]
@@ -344,7 +276,6 @@ defmodule Splitwise.Expenses do
                 share["amount"]
               end
 
-            # If this is the payer's share, mark it as settled
             is_payer = share["user_id"] == expense.paid_by_id
 
             %{
@@ -364,11 +295,9 @@ defmodule Splitwise.Expenses do
       end)
       |> Multi.run(:create_initial_payment, fn _repo,
                                                %{expense: expense, create_shares: shares} ->
-        # Find the payer's share
         payer_share = Enum.find(shares, fn share -> share.user_id == expense.paid_by_id end)
 
         if payer_share do
-          # Create a payment from the payer to themselves
           payment_attrs = %{
             amount: expense.amount,
             from_user_id: expense.paid_by_id,
@@ -453,19 +382,15 @@ defmodule Splitwise.Expenses do
     end
   end
 
-  # Helper function to validate and process percentage-based shares
   defp validate_percentage_shares(shares, total_amount) do
-    # Check if all shares have percentages
     case Enum.find(shares, fn share -> is_nil(share["share_percentage"]) end) do
       nil ->
-        # Validate total percentage
         total_percentage =
           Enum.reduce(shares, 0.0, fn share, acc ->
             acc + share["share_percentage"]
           end)
 
         if abs(total_percentage - 1.0) < 0.01 do
-          # Calculate amounts based on percentages
           updated_shares =
             Enum.map(shares, fn share ->
               amount = total_amount * share["share_percentage"]
@@ -482,19 +407,15 @@ defmodule Splitwise.Expenses do
     end
   end
 
-  # Helper function to validate and process amount-based shares
   defp validate_amount_shares(shares, total_amount) do
-    # Check if all shares have amounts
     case Enum.find(shares, fn share -> is_nil(share["amount"]) end) do
       nil ->
-        # Validate total amount
         total_share_amount =
           Enum.reduce(shares, 0.0, fn share, acc ->
             acc + share["amount"]
           end)
 
         if abs(total_share_amount - total_amount) < 0.01 do
-          # Calculate percentages based on amounts
           updated_shares =
             Enum.map(shares, fn share ->
               percentage = share["amount"] / total_amount
@@ -518,7 +439,6 @@ defmodule Splitwise.Expenses do
   def create_payment_for_share(expense_share_id, payment_params, current_user) do
     Multi.new()
     |> Multi.run(:lock_share_and_expense, fn repo, _changes ->
-      # Lock the share and its expense
       share =
         from(es in ExpenseShare,
           where: es.id == ^expense_share_id,
@@ -527,7 +447,6 @@ defmodule Splitwise.Expenses do
         |> repo.one()
 
       if share do
-        # Lock the expense
         expense =
           from(e in Expense,
             where: e.id == ^share.expense_id,
@@ -549,19 +468,15 @@ defmodule Splitwise.Expenses do
                                          lock_share_and_expense: %{share: share, expense: expense}
                                        } ->
       cond do
-        # Check if payment is being made to the payer
         payment_params["to_user_id"] != expense.paid_by_id ->
           {:error, "Payment must be made to the person who paid the expense"}
 
-        # Check if payment is being made by the share owner
         payment_params["from_user_id"] != share.user_id ->
           {:error, "Payment must be made by the person who owes the share"}
 
-        # Check if payment amount is valid
         payment_params["amount"] > share.remaining_amount ->
           {:error, "Payment amount cannot be greater than remaining amount"}
 
-        # Check if payment amount is positive
         payment_params["amount"] <= 0 ->
           {:error, "Payment amount must be greater than 0"}
 
@@ -586,7 +501,6 @@ defmodule Splitwise.Expenses do
       payment_amount = payment_params["amount"]
       new_remaining_amount = share.remaining_amount - payment_amount
 
-      # Determine if the share is fully settled
       is_settled = abs(new_remaining_amount) < 0.01
 
       share
@@ -598,17 +512,14 @@ defmodule Splitwise.Expenses do
     end)
     |> Multi.run(:check_expense_status, fn repo,
                                            %{get_share: share, update_share: _updated_share} ->
-      # Get all shares for this expense
       shares =
         ExpenseShare
         |> where([es], es.expense_id == ^share.expense_id)
         |> repo.all()
 
-      # Check if all shares are settled
       all_settled = Enum.all?(shares, fn s -> s.status == "settled" end)
 
       if all_settled do
-        # Update expense status to settled
         expense = repo.get(Expense, share.expense_id)
 
         expense
@@ -672,7 +583,6 @@ defmodule Splitwise.Expenses do
     if shares == [] or Enum.any?(shares, fn s -> !is_map(s) or is_nil(s["user_id"]) end) do
       {:error, "Shares list must be a non-empty list of valid share maps with user_id."}
     else
-      # Enforce only the creator can update
       paid_by_id = Map.get(expense_params, "paid_by_id", expense.paid_by_id)
 
       if paid_by_id != expense.paid_by_id do
@@ -680,7 +590,6 @@ defmodule Splitwise.Expenses do
       else
         Multi.new()
         |> Multi.run(:lock_expense, fn repo, _changes ->
-          # Lock the expense and its shares
           expense =
             from(e in Expense,
               where: e.id == ^expense.id,
@@ -689,7 +598,6 @@ defmodule Splitwise.Expenses do
             |> repo.one()
 
           if expense do
-            # Lock all shares for this expense
             from(es in ExpenseShare,
               where: es.expense_id == ^expense.id,
               lock: "FOR UPDATE"
@@ -711,7 +619,6 @@ defmodule Splitwise.Expenses do
             if Enum.any?(user_ids, &is_nil/1) do
               {:error, "Invalid or missing user_id in shares or payer."}
             else
-              # Lock the users table to prevent concurrent group creation
               from(u in User, where: u.id in ^user_ids, lock: "FOR UPDATE")
               |> repo.all()
 
@@ -735,7 +642,6 @@ defmodule Splitwise.Expenses do
           from(es in ExpenseShare, where: es.expense_id == ^expense.id)
         )
         |> Multi.run(:create_shares, fn repo, %{expense: updated_expense} ->
-          # Use the same logic as in creation for share calculation and insertion
           is_equal_split =
             Enum.all?(shares, fn share ->
               is_nil(share["share_percentage"]) and is_nil(share["amount"]) and
@@ -774,7 +680,6 @@ defmodule Splitwise.Expenses do
               end
             end
 
-          # If shares_to_insert is an error tuple, return it
           case shares_to_insert do
             {:error, reason} ->
               {:error, reason}
@@ -853,7 +758,6 @@ defmodule Splitwise.Expenses do
   end
 
   def update_expense(%Expense{} = expense, expense_params, current_user) do
-    # Prevent amount update if expense is settled
     new_amount = Map.get(expense_params, "amount", expense.amount)
 
     if expense.status == "settled" and new_amount != expense.amount do
@@ -861,7 +765,6 @@ defmodule Splitwise.Expenses do
     else
       Multi.new()
       |> Multi.run(:lock_expense, fn repo, _changes ->
-        # Lock the expense
         expense =
           from(e in Expense,
             where: e.id == ^expense.id,
@@ -927,7 +830,8 @@ defmodule Splitwise.Expenses do
         owed_to: %{
           user_id: u.id,
           email: u.email,
-          name: u.name
+          name: u.name,
+          remaining_amount: es.remaining_amount
         },
         created_at: e.inserted_at
       },
@@ -976,165 +880,6 @@ defmodule Splitwise.Expenses do
     |> case do
       [] -> {:error, "No receivable expenses found"}
       shares -> {:ok, shares}
-    end
-  end
-
-  def get_current_user_debit_credit(user_id) do
-    from(es in ExpenseShare,
-      join: e in Expense,
-      on: es.expense_id == e.id,
-      join: u in User,
-      on: e.paid_by_id == u.id,
-      join: g in Group,
-      on: e.group_id == g.id,
-      where: es.user_id == ^user_id and es.status == "pending",
-      select: %{
-        expense_id: e.id,
-        expense_description: e.description
-      }
-    )
-    |> Repo.all()
-    |> case do
-      [] -> {:error, "No debit credit found"}
-      shares -> {:ok, shares}
-    end
-  end
-
-  @doc """
-  Gets a user's status across all groups showing:
-  - Total amount they owe and to whom
-  - Total amount they are owed and by whom
-  - Group-wise breakdown
-  """
-  def get_user_status(user_id) do
-    # Get all groups the user is part of
-    groups =
-      from(g in Group,
-        join: gm in GroupMember,
-        on: gm.group_id == g.id,
-        where: gm.user_id == ^user_id,
-        select: g
-      )
-      |> Repo.all()
-
-    if Enum.empty?(groups) do
-      {:error, "No groups found for user"}
-    else
-      # Get expenses where user owes others
-      expenses_owed =
-        from(es in ExpenseShare,
-          join: e in Expense,
-          on: es.expense_id == e.id,
-          join: u in User,
-          on: e.paid_by_id == u.id,
-          join: g in Group,
-          on: e.group_id == g.id,
-          where:
-            es.user_id == ^user_id and
-              es.status == "pending",
-          select: %{
-            group_id: g.id,
-            group_name: g.name,
-            amount: es.remaining_amount,
-            owed_to: %{
-              user_id: u.id,
-              name: u.name
-            }
-          }
-        )
-        |> Repo.all()
-
-      # Get expenses where others owe the user
-      expenses_receivable =
-        from(es in ExpenseShare,
-          join: e in Expense,
-          on: es.expense_id == e.id,
-          join: u in User,
-          on: es.user_id == u.id,
-          join: g in Group,
-          on: e.group_id == g.id,
-          where:
-            e.paid_by_id == ^user_id and
-              es.status == "pending" and
-              es.user_id != ^user_id,
-          select: %{
-            group_id: g.id,
-            group_name: g.name,
-            amount: es.remaining_amount,
-            owed_by: %{
-              user_id: u.id,
-              name: u.name
-            }
-          }
-        )
-        |> Repo.all()
-
-      # Calculate totals
-      total_owed = Enum.reduce(expenses_owed, 0.0, &(&1.amount + &2))
-      total_receivable = Enum.reduce(expenses_receivable, 0.0, &(&1.amount + &2))
-      net_balance = total_receivable - total_owed
-
-      # Group by user and calculate totals
-      owed_by_user =
-        expenses_owed
-        |> Enum.group_by(& &1.owed_to.user_id)
-        |> Enum.map(fn {_user_id, expenses} ->
-          to_user = Enum.at(expenses, 0).owed_to
-          total = Enum.reduce(expenses, 0.0, &(&1.amount + &2))
-
-          %{
-            to_user: to_user,
-            total: total,
-            groups:
-              Enum.map(
-                expenses,
-                &%{
-                  group_name: &1.group_name,
-                  amount: &1.amount
-                }
-              )
-          }
-        end)
-
-      receivable_by_user =
-        expenses_receivable
-        |> Enum.group_by(& &1.owed_by.user_id)
-        |> Enum.map(fn {_user_id, expenses} ->
-          from_user = Enum.at(expenses, 0).owed_by
-          total = Enum.reduce(expenses, 0.0, &(&1.amount + &2))
-
-          %{
-            from_user: from_user,
-            total: total,
-            groups:
-              Enum.map(
-                expenses,
-                &%{
-                  group_name: &1.group_name,
-                  amount: &1.amount
-                }
-              )
-          }
-        end)
-
-      {:ok,
-       %{
-         summary: %{
-           total_owed: total_owed,
-           total_receivable: total_receivable,
-           net_balance: net_balance,
-           status:
-             cond do
-               net_balance > 0 -> "you_are_owed"
-               net_balance < 0 -> "you_owe"
-               true -> "settled"
-             end
-         },
-         details: %{
-           you_owe: owed_by_user,
-           you_are_owed: receivable_by_user
-         }
-       }}
     end
   end
 

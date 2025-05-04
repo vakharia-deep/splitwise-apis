@@ -99,7 +99,8 @@ defmodule SplitwiseWeb.ExpenseJSON do
       owed_to: %{
         user_id: share.owed_to.user_id,
         email: share.owed_to.email,
-        name: share.owed_to.name
+        name: share.owed_to.name,
+        remaining_amount: share.owed_to.remaining_amount
       },
       created_at: share.created_at
     }

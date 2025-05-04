@@ -27,7 +27,6 @@ defmodule SplitwiseWeb.Router do
     post "/groups/:group_id/add_users", AccountController, :add_users_to_group
     delete "/groups/:group_id/users/:user_id", AccountController, :remove_user_from_group
 
-    # Expense and ExpenseShare routes
     post "/expenses", ExpenseController, :create
     patch "/expenses/:id", ExpenseController, :update
     delete "/expenses/:id", ExpenseController, :delete

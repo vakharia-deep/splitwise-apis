@@ -8,22 +8,64 @@ defmodule SplitwiseWeb.ExpenseController do
     current_user = conn.assigns[:current_user]
     merged_params = Map.put(expense_params, "added_by_id", current_user.id)
 
-    case Expenses.create_expense_with_shares(merged_params, shares, current_user) do
-      {:ok, expense} ->
-        conn
-        |> put_status(:created)
-        |> render(:show, expense: expense)
+    # Validate that shares are valid float values
+    with :ok <- validate_shares(shares),
+         {:ok, converted_shares} <- convert_shares_to_float(shares) do
+      case Expenses.create_expense_with_shares(merged_params, converted_shares, current_user) do
+        {:ok, expense} ->
+          conn
+          |> put_status(:created)
+          |> render(:show, expense: expense)
 
-      {:error, %Ecto.Changeset{} = changeset} ->
+        {:error, %Ecto.Changeset{} = changeset} ->
+          conn
+          |> put_status(:unprocessable_entity)
+          |> put_view(json: SplitwiseWeb.ChangesetJSON)
+          |> render(:error, changeset: changeset)
+
+        {:error, error} when is_binary(error) ->
+          conn
+          |> put_status(:unprocessable_entity)
+          |> json(%{error: error})
+      end
+    else
+      {:error, message} ->
         conn
         |> put_status(:unprocessable_entity)
-        |> put_view(json: SplitwiseWeb.ChangesetJSON)
-        |> render(:error, changeset: changeset)
+        |> json(%{error: message})
+    end
+  end
 
-      {:error, error} when is_binary(error) ->
-        conn
-        |> put_status(:unprocessable_entity)
-        |> json(%{error: error})
+  # Helper function to validate shares
+  defp validate_shares(shares) when is_list(shares) do
+    Enum.reduce_while(shares, :ok, fn share, :ok ->
+      case share do
+        %{"amount" => amount} when is_number(amount) ->
+          {:cont, :ok}
+
+        %{"amount" => amount} ->
+          {:halt, {:error, "Share amount must be a number, got: #{inspect(amount)}"}}
+
+        _ ->
+          {:halt, {:error, "Invalid share format. Each share must have an 'amount' field"}}
+      end
+    end)
+  end
+
+  defp validate_shares(_), do: {:error, "Shares must be a list"}
+
+  # Helper function to convert share amounts to floats
+  defp convert_shares_to_float(shares) do
+    try do
+      converted_shares =
+        Enum.map(shares, fn share ->
+          amount = Map.get(share, "amount")
+          Map.put(share, "amount", amount * 1.0)
+        end)
+
+      {:ok, converted_shares}
+    rescue
+      _ -> {:error, "Failed to convert share amounts to float"}
     end
   end
 
@@ -246,15 +288,6 @@ defmodule SplitwiseWeb.ExpenseController do
         conn
         |> put_status(:unprocessable_entity)
         |> json(%{error: error})
-    end
-  end
-
-  def get_current_user_debit_credit(conn, _params) do
-    user_id = conn.assigns.current_user.id
-
-    case Expenses.get_current_user_debit_credit(user_id) do
-      {:ok, debit_credit} ->
-        render(conn, :debit_credit, debit_credit: debit_credit)
     end
   end
 end
