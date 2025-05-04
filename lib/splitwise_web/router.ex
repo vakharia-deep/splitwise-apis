@@ -15,6 +15,8 @@ defmodule SplitwiseWeb.Router do
 
     resources "/users", AccountController, only: [:create, :update, :delete]
 
+    get "/users", AccountController, :show
+
     get "/expense-shares/receivable", ExpenseController, :get_amount_receivable
     get "/expense-shares/payable", ExpenseController, :get_amount_payable
 

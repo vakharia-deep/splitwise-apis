@@ -22,6 +22,20 @@ defmodule SplitwiseWeb.AccountController do
     end
   end
 
+  def show(conn, _params) do
+    user = conn.assigns[:current_user]
+
+    case Accounts.get_user(user.id) do
+      {:ok, user} ->
+        render(conn, :show, user: user)
+
+      {:error, "User not found"} ->
+        conn
+        |> put_status(:not_found)
+        |> json(%{error: "User not found"})
+    end
+  end
+
   def user_groups(conn, _params) do
     case Accounts.get_user_groups(conn.assigns.current_user.id) do
       {:ok, groups} ->
