@@ -6,7 +6,6 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: splitwise_prod
     ports:
       - "5432:5432"
     volumes:
@@ -17,7 +16,7 @@ services:
     depends_on:
       - db
     environment:
-      DATABASE_URL: postgres://postgres:postgres@db:5432/splitwise_prod
+      DATABASE_URL: postgres://postgres:postgres@db:5432/railway
       SECRET_KEY_BASE: wwHWF6iCP/vsnK8fqXwrrVPbUUUEGJXc
       PORT: 8080
       MIX_ENV: prod
