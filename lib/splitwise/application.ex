@@ -10,7 +10,6 @@ defmodule Splitwise.Application do
     children = [
       SplitwiseWeb.Telemetry,
       Splitwise.Repo,
-      {DNSCluster, query: Application.get_env(:splitwise, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Splitwise.PubSub},
       # Start a worker by calling: Splitwise.Worker.start_link(arg)
       # {Splitwise.Worker, arg},
